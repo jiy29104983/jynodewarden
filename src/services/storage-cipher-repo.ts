@@ -49,6 +49,8 @@ const CIPHER_SCALAR_DATA_KEYS = new Set([
   'updatedAt',
   'updated_at',
   'revisionDate',
+  'lastKnownRevisionDate',
+  'LastKnownRevisionDate',
   'archivedAt',
   'archived_at',
   'archivedDate',
@@ -107,6 +109,14 @@ export async function getCipher(db: D1Database, id: string): Promise<Cipher | nu
   return parseCipherRow(row);
 }
 
+export async function getCipherForUser(db: D1Database, id: string, userId: string): Promise<Cipher | null> {
+  const row = await db
+    .prepare(`SELECT ${selectCipherColumns()} FROM ciphers WHERE id = ? AND user_id = ?`)
+    .bind(id, userId)
+    .first<CipherRow>();
+  return parseCipherRow(row);
+}
+
 export async function saveCipher(db: D1Database, safeBind: SafeBind, cipher: Cipher): Promise<void> {
   const folderId = normalizeOptionalId(cipher.folderId);
   const data = buildCipherData(cipher, folderId);
@@ -114,7 +124,8 @@ export async function saveCipher(db: D1Database, safeBind: SafeBind, cipher: Cip
     'INSERT INTO ciphers(id, user_id, type, folder_id, name, notes, favorite, data, reprompt, key, created_at, updated_at, archived_at, deleted_at) ' +
     'VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ' +
     'ON CONFLICT(id) DO UPDATE SET ' +
-    'user_id=excluded.user_id, type=excluded.type, folder_id=excluded.folder_id, name=excluded.name, notes=excluded.notes, favorite=excluded.favorite, data=excluded.data, reprompt=excluded.reprompt, key=excluded.key, updated_at=excluded.updated_at, archived_at=excluded.archived_at, deleted_at=excluded.deleted_at'
+    'type=excluded.type, folder_id=excluded.folder_id, name=excluded.name, notes=excluded.notes, favorite=excluded.favorite, data=excluded.data, reprompt=excluded.reprompt, key=excluded.key, updated_at=excluded.updated_at, archived_at=excluded.archived_at, deleted_at=excluded.deleted_at ' +
+    'WHERE user_id=excluded.user_id'
   );
   await safeBind(
     stmt,
@@ -133,6 +144,27 @@ export async function saveCipher(db: D1Database, safeBind: SafeBind, cipher: Cip
     cipher.archivedAt ?? null,
     cipher.deletedAt
   ).run();
+}
+
+// A single conditional UPDATE prevents a competing save or deletion between
+// the handler's read and write from being overwritten (or resurrected).
+export async function updateCipherIfUnchanged(
+  db: D1Database,
+  safeBind: SafeBind,
+  cipher: Cipher,
+  expectedUpdatedAt: string
+): Promise<boolean> {
+  const folderId = normalizeOptionalId(cipher.folderId);
+  const result = await safeBind(
+    db.prepare(
+      'UPDATE ciphers SET type=?, folder_id=?, name=?, notes=?, favorite=?, data=?, reprompt=?, key=?, updated_at=?, archived_at=?, deleted_at=? ' +
+      'WHERE id=? AND user_id=? AND updated_at=?'
+    ),
+    Number(cipher.type) || 1, folderId, cipher.name, cipher.notes, cipher.favorite ? 1 : 0,
+    buildCipherData(cipher, folderId), cipher.reprompt ?? 0, cipher.key, cipher.updatedAt,
+    cipher.archivedAt ?? null, cipher.deletedAt, cipher.id, cipher.userId, expectedUpdatedAt
+  ).run();
+  return result.meta.changes === 1;
 }
 
 function sanitizeIds(ids: string[]): string[] {
