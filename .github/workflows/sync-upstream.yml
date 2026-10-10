@@ -85,6 +85,8 @@ jobs:
           npm ci
           npm run build
       - name: Run upstream compatibility and security regression tests
+        env:
+          SCRATCH: ${{ runner.temp }}
         if: steps.prepare.outputs.changed == 'true'
         run: |
           npm run test:config-compatibility
@@ -92,9 +94,9 @@ jobs:
           npm run test:web-crypto
           npm run test:notifications-security
           npm run test:webauthn-connectors
-          node scripts/security-audit-api-key-semantics.mjs
-          node scripts/security-audit-backup-auth-state.mjs
-          node scripts/security-audit-backup-endpoint.mjs
+          node --import tsx --import ./scripts/offline-workers-loader.mjs scripts/security-audit-api-key-semantics.mjs
+          node --import tsx --import ./scripts/offline-workers-loader.mjs scripts/security-audit-backup-auth-state.mjs
+          node --import tsx --import ./scripts/offline-workers-loader.mjs scripts/security-audit-backup-endpoint.mjs
           git diff --exit-code
       - name: Save the validated update patch
         if: steps.prepare.outputs.changed == 'true'
