@@ -1,0 +1,181 @@
+name: Sync upstream NodeWarden
+
+'on':
+  workflow_dispatch:
+  # Installing/updating the sync tool also checks upstream once.
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/sync-upstream.yml
+      - .github/scripts/sync_upstream.py
+      - .github/scripts/test_sync_upstream.py
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/sync-upstream.yml
+      - .github/scripts/sync_upstream.py
+      - .github/scripts/test_sync_upstream.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-sync-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONDONTWRITEBYTECODE: '1'
+
+jobs:
+  validate:
+    name: Validate upstream and deployment settings
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      changed: ${{ steps.prepare.outputs.changed }}
+      base: ${{ steps.prepare.outputs.base }}
+      upstream: ${{ steps.prepare.outputs.upstream }}
+      patch_sha256: ${{ steps.prepare.outputs.patch_sha256 }}
+    steps:
+      - name: Check out the proposed updater or selected main commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Test deployment preservation and repeat synchronization
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py' -v
+      - name: Prepare an upstream snapshot
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=$(git rev-parse HEAD)
+          git fetch --no-tags --depth=1 https://github.com/shuaiplus/nodewarden.git refs/heads/main:refs/remotes/upstream/main
+          upstream=$(python3 .github/scripts/sync_upstream.py upstream/main)
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+          {
+            echo "## 上游同步检查"
+            echo "- 上游提交：\`$upstream\`"
+            echo "- 保留现有 Worker 名称和 npm 包名。"
+            echo "- 数据库、存储、Durable Objects、迁移及部署路由发生变化时停止。"
+            echo "- \`.github/\` 由本仓库维护，不从上游自动覆盖。"
+            echo "- 仅生成更新 PR，合并前请完成密码库备份并检查 Cloudflare 构建设置。"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if git diff --cached --quiet; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            echo '应用文件已同步，无需创建 PR。' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+            git diff --cached --binary > "$RUNNER_TEMP/upstream.patch"
+            patch_sha256=$(sha256sum "$RUNNER_TEMP/upstream.patch" | cut -d ' ' -f 1)
+            echo "patch_sha256=$patch_sha256" >> "$GITHUB_OUTPUT"
+            git diff --cached --stat >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Set up the Node.js version required by upstream
+        if: steps.prepare.outputs.changed == 'true'
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - name: Install dependencies and build
+        if: steps.prepare.outputs.changed == 'true'
+        run: |
+          npm ci
+          npm run build
+      - name: Run upstream compatibility and security regression tests
+        if: steps.prepare.outputs.changed == 'true'
+        run: |
+          npm run test:config-compatibility
+          npm run test:vault-compatibility
+          npm run test:web-crypto
+          npm run test:notifications-security
+          npm run test:webauthn-connectors
+          node scripts/security-audit-api-key-semantics.mjs
+          node scripts/security-audit-backup-auth-state.mjs
+          node scripts/security-audit-backup-endpoint.mjs
+          git diff --exit-code
+      - name: Save the validated update patch
+        if: steps.prepare.outputs.changed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: validated-upstream-patch
+          path: ${{ runner.temp }}/upstream.patch
+          retention-days: 7
+          if-no-files-found: error
+
+  propose:
+    name: Open an update pull request
+    needs: validate
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.validate.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # The write-enabled job never installs or executes upstream application code.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.validate.outputs.base }}
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: validated-upstream-patch
+          path: ${{ runner.temp }}/validated-sync
+      - name: Publish an update branch and PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ needs.validate.outputs.base }}
+          UPSTREAM_SHA: ${{ needs.validate.outputs.upstream }}
+          PATCH_SHA256: ${{ needs.validate.outputs.patch_sha256 }}
+        run: |
+          set -euo pipefail
+          patch="$RUNNER_TEMP/validated-sync/upstream.patch"
+          printf '%s  %s\n' "$PATCH_SHA256" "$patch" | sha256sum --check
+          current_main=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          if [[ "$current_main" != "$BASE_SHA" ]]; then
+            echo 'main 已有新提交，请重新运行同步。' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          branch="sync/upstream-${UPSTREAM_SHA:0:12}-${BASE_SHA:0:8}"
+          git switch -c "$branch"
+          git apply --index "$patch"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m "Sync NodeWarden upstream ${UPSTREAM_SHA:0:12}"
+          if git ls-remote --exit-code origin "refs/heads/$branch" >/dev/null 2>&1; then
+            git fetch origin "$branch"
+            if [[ "$(git rev-parse 'FETCH_HEAD^{tree}')" != "$(git rev-parse 'HEAD^{tree}')" ]]; then
+              echo '已有同名同步分支且内容不同，请人工检查。' >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          else
+            git push origin "HEAD:refs/heads/$branch"
+          fi
+          existing=$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --base main --state open --json url --jq '.[0].url // empty')
+          if [[ -n "$existing" ]]; then
+            echo "已有更新 PR：$existing" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          cat > "$RUNNER_TEMP/sync-pr.md" <<EOF
+          同步 shuaiplus/nodewarden 的提交 \`$UPSTREAM_SHA\`。
+
+          保留现有 Worker 名称、npm 包名以及本仓库的 \`.github/\` 配置。部署资源绑定与迁移配置已经逐项核对；若上游修改这些设置，同步器会停止。
+
+          验证已通过：同步器回归测试、npm ci、生产构建、上游兼容性及安全回归。
+
+          合并前请完成密码库备份，确认 Cloudflare 的 Node.js 版本与 \`.node-version\` 一致。合并可能触发现有 Cloudflare Git 集成部署；此工作流本身不会部署或自动合并。
+          EOF
+          if url=$(gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$branch" --title "同步 NodeWarden 上游 ${UPSTREAM_SHA:0:12}" --body-file "$RUNNER_TEMP/sync-pr.md" 2> "$RUNNER_TEMP/pr-error.txt"); then
+            echo "更新 PR：$url" >> "$GITHUB_STEP_SUMMARY"
+          else
+            cat "$RUNNER_TEMP/pr-error.txt" >&2
+            {
+              echo '更新分支已推送，但创建 PR 失败。'
+              echo '若提示 GitHub Actions 无权创建 PR，请在 Settings → Actions → General 中允许创建 PR。'
+              echo "也可手动创建：https://github.com/$GITHUB_REPOSITORY/compare/main...$branch?expand=1"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
