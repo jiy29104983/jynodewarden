@@ -1,13 +1,13 @@
 {
   "name": "jynodewarden",
-  "version": "1.8.1",
+  "version": "1.8.2",
   "description": "Minimal Bitwarden-compatible server running on Cloudflare Workers",
   "author": "shuaiplus",
   "license": "LGPL-3.0",
   "main": "src/index.ts",
   "type": "module",
   "engines": {
-    "node": "^22.19.0 || >=24.11.0"
+    "node": "^22.23.4 || ^24.22.1 || ^26.12.1"
   },
   "scripts": {
     "dev": "wrangler dev -c wrangler.toml",
@@ -20,6 +20,7 @@
     "i18n:validate": "node scripts/i18n-validate.cjs",
     "test:config-compatibility": "tsx --test scripts/config-compatibility.test.ts",
     "test:vault-compatibility": "tsx --tsconfig webapp/tsconfig.json --import ./scripts/offline-workers-loader.mjs --test scripts/vault-compatibility.test.ts",
+    "test:folder-tree": "tsx --test scripts/folder-tree.test.ts",
     "test:web-crypto": "tsx --test scripts/web-crypto-availability.test.ts",
     "test:notifications-security": "tsx --test scripts/notifications-security.test.ts",
     "test:webauthn-mobile": "node --test scripts/webauthn-mobile-connector.test.mjs",
@@ -54,16 +55,16 @@
   },
   "overrides": {
     "nanoid": "3.3.18",
-    "undici": "8.10.2",
+    "undici": "8.12.2",
     "@babel/core": ">=7.29.6",
     "esbuild": ">=0.28.1",
     "ws": "8.21.0",
-    "sharp": "0.35.4",
+    "sharp": "0.35.5",
     "browserslist": "4.28.7",
     "baseline-browser-mapping": "2.11.0"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260630.1",
+    "@cloudflare/workers-types": "^5.20261001.1",
     "@preact/preset-vite": "^2.10.6",
     "@tailwindcss/vite": "^4.3.3",
     "@types/node": "^26.6.4",
@@ -71,7 +72,7 @@
     "tailwindcss": "^4.3.3",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3",
-    "vite": "^8.3.2",
+    "vite": "^8.3.3",
     "wrangler": "^4.146.0"
   },
   "dependencies": {
